@@ -1,7 +1,8 @@
 import 'dart:async';
-import 'dart:convert';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 void main() {
   runApp(const HrMonitorApp());
@@ -44,6 +45,75 @@ class UserProfile {
   });
 }
 
+// ── Algoritmo de detección de latidos ──
+class BeatDetector {
+  static const int _rateSize = 4;
+  final List<int> _rates = List.filled(_rateSize, 0);
+  int _rateSpot = 0;
+  int _lastBeatTime = 0;
+  double _beatsPerMinute = 0;
+  int _beatAvg = 0;
+
+  // Variables para detección de picos
+  double _irPrev = 0;
+  double _irPrevPrev = 0;
+  double _threshold = 80000;
+  int _lastPeakTime = 0;
+  bool _rising = false;
+
+  int get bpm => _beatAvg;
+  double get instantBpm => _beatsPerMinute;
+
+  void processIR(int irValue) {
+    double ir = irValue.toDouble();
+
+    // Detección de pico: subió y ahora baja
+    if (_irPrev > _threshold && _irPrevPrev < _irPrev && ir < _irPrev) {
+      // Encontramos un pico (latido)
+      int now = DateTime.now().millisecondsSinceEpoch;
+
+      if (_lastPeakTime > 0) {
+        int delta = now - _lastPeakTime;
+
+        // Filtrar deltas razonables (300ms a 2000ms = 30 a 200 BPM)
+        if (delta > 300 && delta < 2000) {
+          _beatsPerMinute = 60000.0 / delta;
+
+          if (_beatsPerMinute > 30 && _beatsPerMinute < 220) {
+            _rates[_rateSpot] = _beatsPerMinute.toInt();
+            _rateSpot = (_rateSpot + 1) % _rateSize;
+
+            _beatAvg = 0;
+            for (int i = 0; i < _rateSize; i++) {
+              _beatAvg += _rates[i];
+            }
+            _beatAvg = _beatAvg ~/ _rateSize;
+          }
+        }
+      }
+      _lastPeakTime = now;
+    }
+
+    // Actualizar threshold dinámico
+    _threshold = _threshold * 0.99 + ir * 0.01;
+    if (_threshold < 50000) _threshold = 50000;
+
+    _irPrevPrev = _irPrev;
+    _irPrev = ir;
+  }
+
+  void reset() {
+    _rates.fillRange(0, _rateSize, 0);
+    _rateSpot = 0;
+    _beatAvg = 0;
+    _beatsPerMinute = 0;
+    _lastPeakTime = 0;
+    _irPrev = 0;
+    _irPrevPrev = 0;
+    _threshold = 80000;
+  }
+}
+
 // ── Pantalla principal con navegación ──
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -56,19 +126,24 @@ class _HomeScreenState extends State<HomeScreen> {
   int _currentIndex = 0;
   final UserProfile _perfil = UserProfile();
   int _bpm = 0;
+  int _irValue = 0;
   bool _conectado = false;
   bool _dedoDetectado = false;
   BluetoothDevice? _device;
-  StreamSubscription? _hrSubscription;
+  StreamSubscription? _irSubscription;
   final List<Map<String, dynamic>> _historial = [];
+  final BeatDetector _beatDetector = BeatDetector();
 
-  // Rangos normales de FC según edad
+  // UUIDs del servicio custom
+  final String _serviceUuid = "00001234-0000-1000-8000-00805f9b34fb";
+  final String _charUuid = "00005678-0000-1000-8000-00805f9b34fb";
+
   Map<String, int> _getRangoNormal() {
     if (_perfil.edad <= 0) return {'min': 60, 'max': 100};
     if (_perfil.edad <= 12) return {'min': 70, 'max': 120};
     if (_perfil.edad <= 18) return {'min': 60, 'max': 100};
     if (_perfil.edad <= 65) return {'min': 60, 'max': 100};
-    return {'min': 60, 'max': 90}; // Adultos mayores
+    return {'min': 60, 'max': 90};
   }
 
   String _getEstado() {
@@ -86,9 +161,14 @@ class _HomeScreenState extends State<HomeScreen> {
     return const Color(0xFFFF4D6A);
   }
 
-  // Conectar al XIAO por BLE
-  Future<void> _escanearYConectar() async {
-    // Verificar que BLE esté encendido
+ Future<void> _escanearYConectar() async {
+    // Pedir permisos en tiempo de ejecución
+    await [
+      Permission.bluetoothScan,
+      Permission.bluetoothConnect,
+      Permission.locationWhenInUse,
+    ].request();
+
     if (await FlutterBluePlus.adapterState.first != BluetoothAdapterState.on) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -98,7 +178,6 @@ class _HomeScreenState extends State<HomeScreen> {
       return;
     }
 
-    // Mostrar diálogo de escaneo
     if (mounted) {
       showDialog(
         context: context,
@@ -115,8 +194,7 @@ class _HomeScreenState extends State<HomeScreen> {
       );
     }
 
-    // Escanear
-    FlutterBluePlus.startScan(timeout: const Duration(seconds: 5));
+    FlutterBluePlus.startScan(timeout: const Duration(seconds: 10));
 
     FlutterBluePlus.scanResults.listen((results) async {
       for (var result in results) {
@@ -127,41 +205,50 @@ class _HomeScreenState extends State<HomeScreen> {
             await result.device.connect(timeout: const Duration(seconds: 5));
             _device = result.device;
 
-            // Descubrir servicios
             List<BluetoothService> services =
                 await result.device.discoverServices();
 
             for (var service in services) {
-              // Heart Rate Service UUID: 0x180D
-              if (service.uuid.toString().contains('180d')) {
+              if (service.uuid.toString().contains('1234')) {
                 for (var characteristic in service.characteristics) {
-                  // Heart Rate Measurement UUID: 0x2A37
-                  if (characteristic.uuid.toString().contains('2a37')) {
+                  if (characteristic.uuid.toString().contains('5678')) {
                     await characteristic.setNotifyValue(true);
-                    _hrSubscription =
+                    _irSubscription =
                         characteristic.onValueReceived.listen((value) {
-                      if (value.length >= 2) {
-                        setState(() {
-                          _bpm = value[1];
-                          _dedoDetectado = _bpm > 0;
-                          _conectado = true;
+                      if (value.length >= 4) {
+                        final bytes = Uint8List.fromList(value);
+                        final irVal = ByteData.sublistView(bytes)
+                            .getUint32(0, Endian.little);
 
-                          // Guardar en historial cada 30 segundos aprox
-                          if (_dedoDetectado && _bpm > 0) {
-                            final ahora = DateTime.now();
-                            if (_historial.isEmpty ||
-                                ahora
-                                        .difference(DateTime.parse(
-                                            _historial.first['fecha']))
-                                        .inSeconds >
-                                    30) {
-                              _historial.insert(0, {
-                                'bpm': _bpm,
-                                'estado': _getEstado(),
-                                'fecha': ahora.toIso8601String(),
-                              });
+                        setState(() {
+                          _irValue = irVal;
+                          _dedoDetectado = irVal > 50000;
+
+                          if (_dedoDetectado) {
+                            _beatDetector.processIR(irVal);
+                            _bpm = _beatDetector.bpm;
+
+                            if (_bpm > 0) {
+                              final ahora = DateTime.now();
+                              if (_historial.isEmpty ||
+                                  ahora
+                                          .difference(DateTime.parse(
+                                              _historial.first['fecha']))
+                                          .inSeconds >
+                                      30) {
+                                _historial.insert(0, {
+                                  'bpm': _bpm,
+                                  'estado': _getEstado(),
+                                  'fecha': ahora.toIso8601String(),
+                                });
+                              }
                             }
+                          } else {
+                            _bpm = 0;
+                            _beatDetector.reset();
                           }
+
+                          _conectado = true;
                         });
                       }
                     });
@@ -171,7 +258,7 @@ class _HomeScreenState extends State<HomeScreen> {
             }
 
             if (mounted) {
-              Navigator.pop(context); // Cerrar diálogo
+              Navigator.pop(context);
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(
                   content: Text('Conectado a XIAO-HRMonitor'),
@@ -192,32 +279,31 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     });
 
-    // Si no encuentra después del timeout
-    await Future.delayed(const Duration(seconds: 6));
+    await Future.delayed(const Duration(seconds: 11));
     if (!_conectado && mounted) {
       Navigator.pop(context);
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('No se encontró XIAO-HRMonitor'),
-        ),
+        const SnackBar(content: Text('No se encontró XIAO-HRMonitor')),
       );
     }
   }
 
   void _desconectar() async {
-    _hrSubscription?.cancel();
+    _irSubscription?.cancel();
     await _device?.disconnect();
     setState(() {
       _conectado = false;
       _bpm = 0;
+      _irValue = 0;
       _dedoDetectado = false;
       _device = null;
     });
+    _beatDetector.reset();
   }
 
   @override
   void dispose() {
-    _hrSubscription?.cancel();
+    _irSubscription?.cancel();
     _device?.disconnect();
     super.dispose();
   }
@@ -256,7 +342,6 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // ── DASHBOARD ──
   Widget _buildDashboard() {
     final rango = _getRangoNormal();
     final estado = _getEstado();
@@ -268,16 +353,12 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // Header
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 const Text(
                   'HR Monitor',
-                  style: TextStyle(
-                    fontSize: 24,
-                    fontWeight: FontWeight.bold,
-                  ),
+                  style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
                 ),
                 Container(
                   padding:
@@ -291,22 +372,17 @@ class _HomeScreenState extends State<HomeScreen> {
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Icon(
-                        Icons.bluetooth,
-                        size: 16,
-                        color: _conectado
-                            ? const Color(0xFF00D4AA)
-                            : Colors.grey,
-                      ),
+                      Icon(Icons.bluetooth, size: 16,
+                          color: _conectado
+                              ? const Color(0xFF00D4AA)
+                              : Colors.grey),
                       const SizedBox(width: 4),
                       Text(
                         _conectado ? 'Conectado' : 'Desconectado',
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: _conectado
-                              ? const Color(0xFF00D4AA)
-                              : Colors.grey,
-                        ),
+                        style: TextStyle(fontSize: 12,
+                            color: _conectado
+                                ? const Color(0xFF00D4AA)
+                                : Colors.grey),
                       ),
                     ],
                   ),
@@ -314,8 +390,6 @@ class _HomeScreenState extends State<HomeScreen> {
               ],
             ),
             const SizedBox(height: 8),
-
-            // Info del usuario
             if (_perfil.nombre.isNotEmpty)
               Text(
                 '${_perfil.nombre} · ${_perfil.edad} años · ${_perfil.peso} kg · ${_perfil.altura} cm',
@@ -323,7 +397,7 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             const SizedBox(height: 24),
 
-            // Card de FC
+            // Card FC
             Container(
               padding: const EdgeInsets.all(24),
               decoration: BoxDecoration(
@@ -333,18 +407,16 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
               child: Column(
                 children: [
-                  const Text(
-                    'Frecuencia Cardíaca',
-                    style: TextStyle(color: Colors.grey, fontSize: 14),
-                  ),
+                  const Text('Frecuencia Cardíaca',
+                      style: TextStyle(color: Colors.grey, fontSize: 14)),
                   const SizedBox(height: 12),
                   Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     crossAxisAlignment: CrossAxisAlignment.baseline,
                     textBaseline: TextBaseline.alphabetic,
                     children: [
-                      Icon(Icons.favorite,
-                          color: color, size: _bpm > 0 ? 36 : 24),
+                      Icon(Icons.favorite, color: color,
+                          size: _bpm > 0 ? 36 : 24),
                       const SizedBox(width: 12),
                       Text(
                         _bpm > 0 ? '$_bpm' : '--',
@@ -355,19 +427,16 @@ class _HomeScreenState extends State<HomeScreen> {
                         ),
                       ),
                       const SizedBox(width: 8),
-                      Text(
-                        'BPM',
-                        style: TextStyle(
-                          fontSize: 18,
-                          color: color.withOpacity(0.7),
-                        ),
-                      ),
+                      Text('BPM',
+                          style: TextStyle(
+                              fontSize: 18,
+                              color: color.withOpacity(0.7))),
                     ],
                   ),
                   const SizedBox(height: 12),
                   Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 16, vertical: 6),
                     decoration: BoxDecoration(
                       color: color.withOpacity(0.15),
                       borderRadius: BorderRadius.circular(20),
@@ -376,7 +445,9 @@ class _HomeScreenState extends State<HomeScreen> {
                       estado == 'Normal'
                           ? '● Normal (${rango['min']}-${rango['max']} BPM)'
                           : estado == 'Sin lectura'
-                              ? 'Esperando lectura...'
+                              ? _dedoDetectado
+                                  ? 'Procesando...'
+                                  : 'Esperando lectura...'
                               : '⚠ $estado (rango: ${rango['min']}-${rango['max']})',
                       style: TextStyle(fontSize: 13, color: color),
                     ),
@@ -384,18 +455,47 @@ class _HomeScreenState extends State<HomeScreen> {
                 ],
               ),
             ),
+            const SizedBox(height: 12),
+
+            // IR Value debug
+            if (_conectado)
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.05),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text('IR: $_irValue',
+                        style:
+                            const TextStyle(color: Colors.grey, fontSize: 12)),
+                    Text(
+                        _dedoDetectado
+                            ? 'Dedo detectado'
+                            : 'Coloca tu dedo',
+                        style: TextStyle(
+                            color: _dedoDetectado
+                                ? const Color(0xFF00D4AA)
+                                : Colors.orange,
+                            fontSize: 12)),
+                  ],
+                ),
+              ),
             const SizedBox(height: 16),
 
-            // Alerta si está fuera de rango
-            if (_dedoDetectado && estado != 'Normal' && estado != 'Sin lectura')
+            // Alerta
+            if (_dedoDetectado &&
+                estado != 'Normal' &&
+                estado != 'Sin lectura')
               Container(
                 padding: const EdgeInsets.all(14),
                 decoration: BoxDecoration(
                   color: const Color(0xFFFF4D6A).withOpacity(0.1),
                   borderRadius: BorderRadius.circular(14),
                   border: Border.all(
-                    color: const Color(0xFFFF4D6A).withOpacity(0.3),
-                  ),
+                      color: const Color(0xFFFF4D6A).withOpacity(0.3)),
                 ),
                 child: Row(
                   children: [
@@ -419,15 +519,14 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             const SizedBox(height: 24),
 
-            // Botón conectar/desconectar
+            // Botón conectar
             ElevatedButton.icon(
               onPressed: _conectado ? _desconectar : _escanearYConectar,
               icon: Icon(_conectado
                   ? Icons.bluetooth_disabled
                   : Icons.bluetooth_searching),
-              label: Text(_conectado
-                  ? 'Desconectar'
-                  : 'Conectar sensor'),
+              label:
+                  Text(_conectado ? 'Desconectar' : 'Conectar sensor'),
               style: ElevatedButton.styleFrom(
                 backgroundColor: _conectado
                     ? Colors.grey.shade800
@@ -435,12 +534,9 @@ class _HomeScreenState extends State<HomeScreen> {
                 foregroundColor: Colors.white,
                 padding: const EdgeInsets.symmetric(vertical: 16),
                 shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(30),
-                ),
+                    borderRadius: BorderRadius.circular(30)),
                 textStyle: const TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.bold,
-                ),
+                    fontSize: 16, fontWeight: FontWeight.bold),
               ),
             ),
           ],
@@ -449,7 +545,6 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // ── HISTORIAL ──
   Widget _buildHistorial() {
     return SafeArea(
       child: Column(
@@ -457,10 +552,8 @@ class _HomeScreenState extends State<HomeScreen> {
         children: [
           const Padding(
             padding: EdgeInsets.all(20),
-            child: Text(
-              'Historial',
-              style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
-            ),
+            child: Text('Historial',
+                style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
           ),
           Expanded(
             child: _historial.isEmpty
@@ -486,8 +579,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       return Card(
                         margin: const EdgeInsets.only(bottom: 10),
                         shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(14),
-                        ),
+                            borderRadius: BorderRadius.circular(14)),
                         child: ListTile(
                           contentPadding: const EdgeInsets.symmetric(
                               horizontal: 16, vertical: 8),
@@ -495,28 +587,19 @@ class _HomeScreenState extends State<HomeScreen> {
                             backgroundColor: esNormal
                                 ? const Color(0xFF00D4AA).withOpacity(0.2)
                                 : const Color(0xFFFF4D6A).withOpacity(0.2),
-                            child: Icon(
-                              Icons.favorite,
-                              color: esNormal
-                                  ? const Color(0xFF00D4AA)
-                                  : const Color(0xFFFF4D6A),
-                            ),
+                            child: Icon(Icons.favorite,
+                                color: esNormal
+                                    ? const Color(0xFF00D4AA)
+                                    : const Color(0xFFFF4D6A)),
                           ),
-                          title: Text(
-                            '${m['bpm']} BPM',
-                            style: const TextStyle(
-                              fontWeight: FontWeight.bold,
-                              fontSize: 18,
-                            ),
-                          ),
-                          subtitle: Text(
-                            m['estado'],
-                            style: TextStyle(
-                              color: esNormal
-                                  ? const Color(0xFF00D4AA)
-                                  : const Color(0xFFFF4D6A),
-                            ),
-                          ),
+                          title: Text('${m['bpm']} BPM',
+                              style: const TextStyle(
+                                  fontWeight: FontWeight.bold, fontSize: 18)),
+                          subtitle: Text(m['estado'],
+                              style: TextStyle(
+                                  color: esNormal
+                                      ? const Color(0xFF00D4AA)
+                                      : const Color(0xFFFF4D6A))),
                           trailing: Text(
                             '${fecha.day}/${fecha.month}/${fecha.year}\n${fecha.hour}:${fecha.minute.toString().padLeft(2, '0')}',
                             textAlign: TextAlign.right,
@@ -533,11 +616,10 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // ── PERFIL ──
   Widget _buildPerfil() {
     final nombreCtrl = TextEditingController(text: _perfil.nombre);
-    final edadCtrl =
-        TextEditingController(text: _perfil.edad > 0 ? '${_perfil.edad}' : '');
+    final edadCtrl = TextEditingController(
+        text: _perfil.edad > 0 ? '${_perfil.edad}' : '');
     final pesoCtrl = TextEditingController(
         text: _perfil.peso > 0 ? '${_perfil.peso}' : '');
     final alturaCtrl = TextEditingController(
@@ -549,23 +631,20 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const Text(
-              'Tu perfil',
-              style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
-            ),
+            const Text('Tu perfil',
+                style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
             const SizedBox(height: 8),
             const Text(
-              'Tus datos se usan para personalizar las alertas de FC',
-              style: TextStyle(color: Colors.grey, fontSize: 13),
-            ),
+                'Tus datos se usan para personalizar las alertas de FC',
+                style: TextStyle(color: Colors.grey, fontSize: 13)),
             const SizedBox(height: 24),
             TextField(
               controller: nombreCtrl,
               decoration: InputDecoration(
                 labelText: 'Nombre',
                 prefixIcon: const Icon(Icons.person),
-                border:
-                    OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12)),
                 filled: true,
                 fillColor: Colors.white.withOpacity(0.05),
               ),
@@ -577,15 +656,13 @@ class _HomeScreenState extends State<HomeScreen> {
               decoration: InputDecoration(
                 labelText: 'Edad',
                 prefixIcon: const Icon(Icons.cake),
-                border:
-                    OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12)),
                 filled: true,
                 fillColor: Colors.white.withOpacity(0.05),
               ),
             ),
             const SizedBox(height: 14),
-
-            // Selector de sexo
             const Text('Sexo',
                 style: TextStyle(color: Colors.grey, fontSize: 13)),
             const SizedBox(height: 8),
@@ -593,7 +670,8 @@ class _HomeScreenState extends State<HomeScreen> {
               children: [
                 Expanded(
                   child: GestureDetector(
-                    onTap: () => setState(() => _perfil.sexo = 'Masculino'),
+                    onTap: () =>
+                        setState(() => _perfil.sexo = 'Masculino'),
                     child: Container(
                       padding: const EdgeInsets.symmetric(vertical: 12),
                       decoration: BoxDecoration(
@@ -602,21 +680,17 @@ class _HomeScreenState extends State<HomeScreen> {
                             : Colors.white.withOpacity(0.05),
                         borderRadius: BorderRadius.circular(12),
                         border: Border.all(
-                          color: _perfil.sexo == 'Masculino'
-                              ? const Color(0xFFFF4D6A)
-                              : Colors.grey.shade700,
-                        ),
-                      ),
-                      child: Center(
-                        child: Text(
-                          'Masculino',
-                          style: TextStyle(
                             color: _perfil.sexo == 'Masculino'
                                 ? const Color(0xFFFF4D6A)
-                                : Colors.grey,
-                            fontWeight: FontWeight.w500,
-                          ),
-                        ),
+                                : Colors.grey.shade700),
+                      ),
+                      child: Center(
+                        child: Text('Masculino',
+                            style: TextStyle(
+                                color: _perfil.sexo == 'Masculino'
+                                    ? const Color(0xFFFF4D6A)
+                                    : Colors.grey,
+                                fontWeight: FontWeight.w500)),
                       ),
                     ),
                   ),
@@ -624,7 +698,8 @@ class _HomeScreenState extends State<HomeScreen> {
                 const SizedBox(width: 12),
                 Expanded(
                   child: GestureDetector(
-                    onTap: () => setState(() => _perfil.sexo = 'Femenino'),
+                    onTap: () =>
+                        setState(() => _perfil.sexo = 'Femenino'),
                     child: Container(
                       padding: const EdgeInsets.symmetric(vertical: 12),
                       decoration: BoxDecoration(
@@ -633,21 +708,17 @@ class _HomeScreenState extends State<HomeScreen> {
                             : Colors.white.withOpacity(0.05),
                         borderRadius: BorderRadius.circular(12),
                         border: Border.all(
-                          color: _perfil.sexo == 'Femenino'
-                              ? const Color(0xFFFF4D6A)
-                              : Colors.grey.shade700,
-                        ),
-                      ),
-                      child: Center(
-                        child: Text(
-                          'Femenino',
-                          style: TextStyle(
                             color: _perfil.sexo == 'Femenino'
                                 ? const Color(0xFFFF4D6A)
-                                : Colors.grey,
-                            fontWeight: FontWeight.w500,
-                          ),
-                        ),
+                                : Colors.grey.shade700),
+                      ),
+                      child: Center(
+                        child: Text('Femenino',
+                            style: TextStyle(
+                                color: _perfil.sexo == 'Femenino'
+                                    ? const Color(0xFFFF4D6A)
+                                    : Colors.grey,
+                                fontWeight: FontWeight.w500)),
                       ),
                     ),
                   ),
@@ -661,8 +732,8 @@ class _HomeScreenState extends State<HomeScreen> {
               decoration: InputDecoration(
                 labelText: 'Peso (kg)',
                 prefixIcon: const Icon(Icons.fitness_center),
-                border:
-                    OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12)),
                 filled: true,
                 fillColor: Colors.white.withOpacity(0.05),
               ),
@@ -674,8 +745,8 @@ class _HomeScreenState extends State<HomeScreen> {
               decoration: InputDecoration(
                 labelText: 'Altura (cm)',
                 prefixIcon: const Icon(Icons.height),
-                border:
-                    OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12)),
                 filled: true,
                 fillColor: Colors.white.withOpacity(0.05),
               ),
@@ -687,7 +758,8 @@ class _HomeScreenState extends State<HomeScreen> {
                   _perfil.nombre = nombreCtrl.text;
                   _perfil.edad = int.tryParse(edadCtrl.text) ?? 0;
                   _perfil.peso = double.tryParse(pesoCtrl.text) ?? 0;
-                  _perfil.altura = double.tryParse(alturaCtrl.text) ?? 0;
+                  _perfil.altura =
+                      double.tryParse(alturaCtrl.text) ?? 0;
                 });
                 ScaffoldMessenger.of(context).showSnackBar(
                   const SnackBar(
@@ -701,12 +773,9 @@ class _HomeScreenState extends State<HomeScreen> {
                 foregroundColor: Colors.white,
                 padding: const EdgeInsets.symmetric(vertical: 16),
                 shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(30),
-                ),
+                    borderRadius: BorderRadius.circular(30)),
                 textStyle: const TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.bold,
-                ),
+                    fontSize: 16, fontWeight: FontWeight.bold),
               ),
               child: const Text('Guardar perfil'),
             ),
