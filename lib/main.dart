@@ -75,7 +75,7 @@ class BeatDetector {
       if (_lastPeakTime > 0) {
         int delta = now - _lastPeakTime;
 
-        // Filtrar deltas razonables (300ms a 2000ms = 30 a 200 BPM)
+        // Filtrar 300ms a 2000ms = 30 a 200 BPM
         if (delta > 300 && delta < 2000) {
           _beatsPerMinute = 60000.0 / delta;
 
@@ -114,7 +114,7 @@ class BeatDetector {
   }
 }
 
-// ── Pantalla principal con navegación ──
+// Pantalla principal con navegación
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
@@ -448,7 +448,7 @@ class _HomeScreenState extends State<HomeScreen> {
                               ? _dedoDetectado
                                   ? 'Procesando...'
                                   : 'Esperando lectura...'
-                              : '⚠ $estado (rango: ${rango['min']}-${rango['max']})',
+                              : '$estado (rango: ${rango['min']}-${rango['max']})',
                       style: TextStyle(fontSize: 13, color: color),
                     ),
                   ),
