@@ -21,148 +21,248 @@ class HrMonitorApp extends StatelessWidget {
           seedColor: const Color(0xFFFF4D6A),
           brightness: Brightness.dark,
         ),
+        scaffoldBackgroundColor: const Color(0xFF0E1116),
         useMaterial3: true,
       ),
-      home: const HomeScreen(),
+      home: const MonitorScreen(),
     );
   }
 }
 
-// ── Modelo de datos del usuario ──
-class UserProfile {
-  String nombre;
-  int edad;
-  String sexo;
-  double peso;
-  double altura;
-
-  UserProfile({
-    this.nombre = '',
-    this.edad = 0,
-    this.sexo = 'Masculino',
-    this.peso = 0,
-    this.altura = 0,
-  });
-}
-
 // ── Algoritmo de detección de latidos ──
+// Usa filtro DC + media móvil + detección por cruce por cero
+// con período refractario para evitar doble conteo
 class BeatDetector {
-  static const int _rateSize = 4;
-  final List<int> _rates = List.filled(_rateSize, 0);
-  int _rateSpot = 0;
+  // Filtro DC pasa-altas IIR
+  double _dcW = 0;
+  static const double _dcAlpha = 0.95;
+
+  // Media móvil
+  static const int _maSize = 4;
+  final List<double> _maBuffer = List.filled(_maSize, 0);
+  int _maIndex = 0;
+  double _maSum = 0;
+
+  // Estado de detección
+  double _signalPrev = 0;
   int _lastBeatTime = 0;
-  double _beatsPerMinute = 0;
-  int _beatAvg = 0;
+  int _samplesProcessed = 0;
 
-  // Variables para detección de picos
-  double _irPrev = 0;
-  double _irPrevPrev = 0;
-  double _threshold = 80000;
-  int _lastPeakTime = 0;
-  bool _rising = false;
+  // Período refractario: 300ms = máx 200 BPM
+  // (evita doble conteo de la dícrota)
+  static const int _refractoryMs = 300;
 
-  int get bpm => _beatAvg;
-  double get instantBpm => _beatsPerMinute;
+  // Tracking para diagnóstico
+  double _lastSignal = 0;
+  double _signalMin = 0;
+  double _signalMax = 0;
+  int _lastBeatDetectedAt = 0; // para parpadeo visual
+
+  // Validación de variabilidad: rechaza cambios extremos
+  int _lastValidInterval = 0;
+
+  // Buffer temporal de BPMs
+  final List<MapEntry<int, int>> _bpmHistory = [];
+  static const int _averageWindowMs = 15000;
+  static const int _minSamplesForAvg = 2; // bajado de 3 a 2 para mostrar antes
+
+  int _avgBpm = 0;
+  double _instantBpm = 0;
+
+  int get bpm => _avgBpm;
+  double get instantBpm => _instantBpm;
+  int get sampleCount => _bpmHistory.length;
+  bool get hasReliableReading => _bpmHistory.length >= _minSamplesForAvg;
+  double get currentSignal => _lastSignal;
+  double get signalAmplitude => _signalMax - _signalMin;
+  int get lastBeatDetectedAt => _lastBeatDetectedAt;
 
   void processIR(int irValue) {
-    double ir = irValue.toDouble();
+    if (irValue < 50000) return;
 
-    // Detección de pico: subió y ahora baja
-    if (_irPrev > _threshold && _irPrevPrev < _irPrev && ir < _irPrev) {
-      // Encontramos un pico (latido)
-      int now = DateTime.now().millisecondsSinceEpoch;
+    double raw = irValue.toDouble();
+    _samplesProcessed++;
 
-      if (_lastPeakTime > 0) {
-        int delta = now - _lastPeakTime;
+    // Filtro DC pasa-altas
+    double dcW = raw + _dcAlpha * _dcW;
+    double dcOut = dcW - _dcW;
+    _dcW = dcW;
 
+<<<<<<< HEAD
         // Filtrar 300ms a 2000ms = 30 a 200 BPM
         if (delta > 300 && delta < 2000) {
           _beatsPerMinute = 60000.0 / delta;
+=======
+    // Media móvil
+    _maSum -= _maBuffer[_maIndex];
+    _maBuffer[_maIndex] = dcOut;
+    _maSum += dcOut;
+    _maIndex = (_maIndex + 1) % _maSize;
+    double signal = _maSum / _maSize;
+>>>>>>> 65bc4fc (Cambié el main.dart, usando promedio de FC)
 
-          if (_beatsPerMinute > 30 && _beatsPerMinute < 220) {
-            _rates[_rateSpot] = _beatsPerMinute.toInt();
-            _rateSpot = (_rateSpot + 1) % _rateSize;
+    _lastSignal = signal;
 
-            _beatAvg = 0;
-            for (int i = 0; i < _rateSize; i++) {
-              _beatAvg += _rates[i];
+    // Esperar a que el filtro DC se estabilice (~1 segundo)
+    if (_samplesProcessed < 50) {
+      _signalPrev = signal;
+      return;
+    }
+
+    // Tracking de amplitud (ventana móvil simple)
+    if (_samplesProcessed % 100 == 0) {
+      _signalMin = signal;
+      _signalMax = signal;
+    } else {
+      if (signal < _signalMin) _signalMin = signal;
+      if (signal > _signalMax) _signalMax = signal;
+    }
+
+    int now = DateTime.now().millisecondsSinceEpoch;
+
+    // Detección por cruce por cero ascendente
+    bool zeroCrossing = _signalPrev < 0 && signal >= 0;
+
+    if (zeroCrossing && (now - _lastBeatTime) > _refractoryMs) {
+      _lastBeatDetectedAt = now;
+
+      if (_lastBeatTime > 0) {
+        int delta = now - _lastBeatTime;
+
+        // Rango fisiológico: 40-200 BPM
+        if (delta >= 300 && delta <= 1500) {
+          _instantBpm = 60000.0 / delta;
+          int bpmInt = _instantBpm.round();
+
+          // Validación de variabilidad (más permisiva: 50%)
+          bool intervalIsValid = true;
+          if (_lastValidInterval > 0) {
+            double change = (delta - _lastValidInterval).abs() /
+                _lastValidInterval.toDouble();
+            if (change > 0.50) {
+              intervalIsValid = false;
             }
-            _beatAvg = _beatAvg ~/ _rateSize;
+          }
+
+          if (intervalIsValid) {
+            _lastValidInterval = delta;
+            _bpmHistory.add(MapEntry(now, bpmInt));
+
+            _bpmHistory.removeWhere(
+                (e) => now - e.key > _averageWindowMs);
+
+            // MEDIANA (más robusta a outliers)
+            if (_bpmHistory.length >= _minSamplesForAvg) {
+              List<int> sorted = _bpmHistory.map((e) => e.value).toList()
+                ..sort();
+              int n = sorted.length;
+              if (n.isOdd) {
+                _avgBpm = sorted[n ~/ 2];
+              } else {
+                _avgBpm =
+                    ((sorted[n ~/ 2 - 1] + sorted[n ~/ 2]) / 2).round();
+              }
+            }
           }
         }
       }
-      _lastPeakTime = now;
+      _lastBeatTime = now;
     }
 
-    // Actualizar threshold dinámico
-    _threshold = _threshold * 0.99 + ir * 0.01;
-    if (_threshold < 50000) _threshold = 50000;
-
-    _irPrevPrev = _irPrev;
-    _irPrev = ir;
+    _signalPrev = signal;
   }
 
   void reset() {
-    _rates.fillRange(0, _rateSize, 0);
-    _rateSpot = 0;
-    _beatAvg = 0;
-    _beatsPerMinute = 0;
-    _lastPeakTime = 0;
-    _irPrev = 0;
-    _irPrevPrev = 0;
-    _threshold = 80000;
+    _dcW = 0;
+    _maBuffer.fillRange(0, _maSize, 0);
+    _maIndex = 0;
+    _maSum = 0;
+    _signalPrev = 0;
+    _lastBeatTime = 0;
+    _samplesProcessed = 0;
+    _lastValidInterval = 0;
+    _bpmHistory.clear();
+    _avgBpm = 0;
+    _instantBpm = 0;
+    _lastSignal = 0;
+    _signalMin = 0;
+    _signalMax = 0;
+    _lastBeatDetectedAt = 0;
   }
 }
 
+<<<<<<< HEAD
 // Pantalla principal con navegación
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
+=======
+// ── Pantalla única: Monitor ──
+class MonitorScreen extends StatefulWidget {
+  const MonitorScreen({super.key});
+>>>>>>> 65bc4fc (Cambié el main.dart, usando promedio de FC)
 
   @override
-  State<HomeScreen> createState() => _HomeScreenState();
+  State<MonitorScreen> createState() => _MonitorScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
-  int _currentIndex = 0;
-  final UserProfile _perfil = UserProfile();
+class _MonitorScreenState extends State<MonitorScreen>
+    with TickerProviderStateMixin {
   int _bpm = 0;
   int _irValue = 0;
   bool _conectado = false;
   bool _dedoDetectado = false;
   BluetoothDevice? _device;
   StreamSubscription? _irSubscription;
-  final List<Map<String, dynamic>> _historial = [];
   final BeatDetector _beatDetector = BeatDetector();
 
-  // UUIDs del servicio custom
-  final String _serviceUuid = "00001234-0000-1000-8000-00805f9b34fb";
-  final String _charUuid = "00005678-0000-1000-8000-00805f9b34fb";
+  late AnimationController _heartController;
+  late Animation<double> _heartAnimation;
 
-  Map<String, int> _getRangoNormal() {
-    if (_perfil.edad <= 0) return {'min': 60, 'max': 100};
-    if (_perfil.edad <= 12) return {'min': 70, 'max': 120};
-    if (_perfil.edad <= 18) return {'min': 60, 'max': 100};
-    if (_perfil.edad <= 65) return {'min': 60, 'max': 100};
-    return {'min': 60, 'max': 90};
+  static const int _minNormal = 60;
+  static const int _maxNormal = 100;
+
+  @override
+  void initState() {
+    super.initState();
+    _heartController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 800),
+    )..repeat(reverse: true);
+    _heartAnimation = Tween<double>(begin: 1.0, end: 1.15).animate(
+      CurvedAnimation(parent: _heartController, curve: Curves.easeInOut),
+    );
+  }
+
+  void _updateHeartAnimationSpeed() {
+    if (_bpm > 0) {
+      final ms = (60000 / _bpm / 2).round().clamp(200, 1500);
+      _heartController.duration = Duration(milliseconds: ms);
+      if (!_heartController.isAnimating) {
+        _heartController.repeat(reverse: true);
+      }
+    } else {
+      _heartController.duration = const Duration(milliseconds: 800);
+    }
   }
 
   String _getEstado() {
     if (!_dedoDetectado || _bpm == 0) return 'Sin lectura';
-    final rango = _getRangoNormal();
-    if (_bpm < rango['min']!) return 'Bradicardia';
-    if (_bpm > rango['max']!) return 'Taquicardia';
+    if (!_beatDetector.hasReliableReading) return 'Calibrando';
+    if (_bpm < _minNormal) return 'Bradicardia';
+    if (_bpm > _maxNormal) return 'Taquicardia';
     return 'Normal';
   }
 
   Color _getColorEstado() {
     final estado = _getEstado();
     if (estado == 'Normal') return const Color(0xFF00D4AA);
-    if (estado == 'Sin lectura') return Colors.grey;
+    if (estado == 'Sin lectura' || estado == 'Calibrando') {
+      return const Color(0xFF6B7280);
+    }
     return const Color(0xFFFF4D6A);
   }
 
- Future<void> _escanearYConectar() async {
-    // Pedir permisos en tiempo de ejecución
+  Future<void> _escanearYConectar() async {
     await [
       Permission.bluetoothScan,
       Permission.bluetoothConnect,
@@ -182,10 +282,20 @@ class _HomeScreenState extends State<HomeScreen> {
       showDialog(
         context: context,
         barrierDismissible: false,
-        builder: (_) => const AlertDialog(
-          content: Row(
+        builder: (_) => AlertDialog(
+          backgroundColor: const Color(0xFF1A1F26),
+          shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20)),
+          content: const Row(
             children: [
-              CircularProgressIndicator(),
+              SizedBox(
+                width: 24,
+                height: 24,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2.5,
+                  color: Color(0xFFFF4D6A),
+                ),
+              ),
               SizedBox(width: 20),
               Text('Buscando XIAO-HRMonitor...'),
             ],
@@ -227,25 +337,11 @@ class _HomeScreenState extends State<HomeScreen> {
                           if (_dedoDetectado) {
                             _beatDetector.processIR(irVal);
                             _bpm = _beatDetector.bpm;
-
-                            if (_bpm > 0) {
-                              final ahora = DateTime.now();
-                              if (_historial.isEmpty ||
-                                  ahora
-                                          .difference(DateTime.parse(
-                                              _historial.first['fecha']))
-                                          .inSeconds >
-                                      30) {
-                                _historial.insert(0, {
-                                  'bpm': _bpm,
-                                  'estado': _getEstado(),
-                                  'fecha': ahora.toIso8601String(),
-                                });
-                              }
-                            }
+                            _updateHeartAnimationSpeed();
                           } else {
                             _bpm = 0;
                             _beatDetector.reset();
+                            _updateHeartAnimationSpeed();
                           }
 
                           _conectado = true;
@@ -260,9 +356,12 @@ class _HomeScreenState extends State<HomeScreen> {
             if (mounted) {
               Navigator.pop(context);
               ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text('Conectado a XIAO-HRMonitor'),
-                  backgroundColor: Color(0xFF00D4AA),
+                SnackBar(
+                  content: const Text('Conectado a XIAO-HRMonitor'),
+                  backgroundColor: const Color(0xFF00D4AA),
+                  behavior: SnackBarBehavior.floating,
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12)),
                 ),
               );
             }
@@ -299,10 +398,12 @@ class _HomeScreenState extends State<HomeScreen> {
       _device = null;
     });
     _beatDetector.reset();
+    _updateHeartAnimationSpeed();
   }
 
   @override
   void dispose() {
+    _heartController.dispose();
     _irSubscription?.cancel();
     _device?.disconnect();
     super.dispose();
@@ -310,137 +411,48 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final screens = [
-      _buildDashboard(),
-      _buildHistorial(),
-      _buildPerfil(),
-    ];
-
-    return Scaffold(
-      body: screens[_currentIndex],
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: _currentIndex,
-        onDestinationSelected: (i) => setState(() => _currentIndex = i),
-        destinations: const [
-          NavigationDestination(
-            icon: Icon(Icons.monitor_heart_outlined),
-            selectedIcon: Icon(Icons.monitor_heart),
-            label: 'Monitor',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.history),
-            selectedIcon: Icon(Icons.history),
-            label: 'Historial',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.person_outline),
-            selectedIcon: Icon(Icons.person),
-            label: 'Perfil',
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildDashboard() {
-    final rango = _getRangoNormal();
     final estado = _getEstado();
     final color = _getColorEstado();
 
-    return SafeArea(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                const Text(
-                  'HR Monitor',
-                  style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
-                ),
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                  decoration: BoxDecoration(
-                    color: _conectado
-                        ? const Color(0xFF00D4AA).withOpacity(0.2)
-                        : Colors.grey.withOpacity(0.2),
-                    borderRadius: BorderRadius.circular(20),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Icons.bluetooth, size: 16,
-                          color: _conectado
-                              ? const Color(0xFF00D4AA)
-                              : Colors.grey),
-                      const SizedBox(width: 4),
-                      Text(
-                        _conectado ? 'Conectado' : 'Desconectado',
-                        style: TextStyle(fontSize: 12,
-                            color: _conectado
-                                ? const Color(0xFF00D4AA)
-                                : Colors.grey),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            if (_perfil.nombre.isNotEmpty)
-              Text(
-                '${_perfil.nombre} · ${_perfil.edad} años · ${_perfil.peso} kg · ${_perfil.altura} cm',
-                style: const TextStyle(color: Colors.grey, fontSize: 13),
-              ),
-            const SizedBox(height: 24),
+    // Indicador visual de latido detectado (parpadeo verde por 200ms)
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final beatRecent =
+        (now - _beatDetector.lastBeatDetectedAt) < 200 && _dedoDetectado;
 
-            // Card FC
-            Container(
-              padding: const EdgeInsets.all(24),
-              decoration: BoxDecoration(
-                color: color.withOpacity(0.08),
-                borderRadius: BorderRadius.circular(24),
-                border: Border.all(color: color.withOpacity(0.2)),
-              ),
-              child: Column(
+    return Scaffold(
+      body: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // Header
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  const Text('Frecuencia Cardíaca',
-                      style: TextStyle(color: Colors.grey, fontSize: 14)),
-                  const SizedBox(height: 12),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    crossAxisAlignment: CrossAxisAlignment.baseline,
-                    textBaseline: TextBaseline.alphabetic,
-                    children: [
-                      Icon(Icons.favorite, color: color,
-                          size: _bpm > 0 ? 36 : 24),
-                      const SizedBox(width: 12),
-                      Text(
-                        _bpm > 0 ? '$_bpm' : '--',
-                        style: TextStyle(
-                          fontSize: 64,
-                          fontWeight: FontWeight.w800,
-                          color: color,
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Text('BPM',
-                          style: TextStyle(
-                              fontSize: 18,
-                              color: color.withOpacity(0.7))),
-                    ],
+                  const Text(
+                    'HR Monitor',
+                    style: TextStyle(
+                      fontSize: 28,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: -0.5,
+                    ),
                   ),
-                  const SizedBox(height: 12),
                   Container(
                     padding: const EdgeInsets.symmetric(
-                        horizontal: 16, vertical: 6),
+                        horizontal: 12, vertical: 8),
                     decoration: BoxDecoration(
-                      color: color.withOpacity(0.15),
+                      color: _conectado
+                          ? const Color(0xFF00D4AA).withOpacity(0.15)
+                          : Colors.white.withOpacity(0.06),
                       borderRadius: BorderRadius.circular(20),
+                      border: Border.all(
+                        color: _conectado
+                            ? const Color(0xFF00D4AA).withOpacity(0.3)
+                            : Colors.white.withOpacity(0.08),
+                      ),
                     ),
+<<<<<<< HEAD
                     child: Text(
                       estado == 'Normal'
                           ? '● Normal (${rango['min']}-${rango['max']} BPM)'
@@ -450,337 +462,468 @@ class _HomeScreenState extends State<HomeScreen> {
                                   : 'Esperando lectura...'
                               : '$estado (rango: ${rango['min']}-${rango['max']})',
                       style: TextStyle(fontSize: 13, color: color),
+=======
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Container(
+                          width: 8,
+                          height: 8,
+                          decoration: BoxDecoration(
+                            color: _conectado
+                                ? const Color(0xFF00D4AA)
+                                : Colors.grey,
+                            shape: BoxShape.circle,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          _conectado ? 'En vivo' : 'Sin conexión',
+                          style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w500,
+                              color: _conectado
+                                  ? const Color(0xFF00D4AA)
+                                  : Colors.grey),
+                        ),
+                      ],
+>>>>>>> 65bc4fc (Cambié el main.dart, usando promedio de FC)
                     ),
                   ),
                 ],
               ),
-            ),
-            const SizedBox(height: 12),
+              const SizedBox(height: 32),
 
-            // IR Value debug
-            if (_conectado)
+              // Card principal de FC
               Container(
-                padding: const EdgeInsets.all(12),
+                padding: const EdgeInsets.symmetric(
+                    vertical: 36, horizontal: 24),
                 decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(0.05),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text('IR: $_irValue',
-                        style:
-                            const TextStyle(color: Colors.grey, fontSize: 12)),
-                    Text(
-                        _dedoDetectado
-                            ? 'Dedo detectado'
-                            : 'Coloca tu dedo',
-                        style: TextStyle(
-                            color: _dedoDetectado
-                                ? const Color(0xFF00D4AA)
-                                : Colors.orange,
-                            fontSize: 12)),
-                  ],
-                ),
-              ),
-            const SizedBox(height: 16),
-
-            // Alerta
-            if (_dedoDetectado &&
-                estado != 'Normal' &&
-                estado != 'Sin lectura')
-              Container(
-                padding: const EdgeInsets.all(14),
-                decoration: BoxDecoration(
-                  color: const Color(0xFFFF4D6A).withOpacity(0.1),
-                  borderRadius: BorderRadius.circular(14),
+                  gradient: LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [
+                      color.withOpacity(0.18),
+                      color.withOpacity(0.04),
+                    ],
+                  ),
+                  borderRadius: BorderRadius.circular(28),
                   border: Border.all(
-                      color: const Color(0xFFFF4D6A).withOpacity(0.3)),
-                ),
-                child: Row(
-                  children: [
-                    const CircleAvatar(
-                      backgroundColor: Color(0xFFFF4D6A),
-                      radius: 16,
-                      child:
-                          Icon(Icons.warning, color: Colors.white, size: 18),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Text(
-                        estado == 'Taquicardia'
-                            ? 'FC elevada. Considera descansar y relajarte.'
-                            : 'FC baja. Si presentas mareos, consulta a un médico.',
-                        style: const TextStyle(fontSize: 13),
-                      ),
+                      color: color.withOpacity(0.25), width: 1.2),
+                  boxShadow: [
+                    BoxShadow(
+                      color: color.withOpacity(0.15),
+                      blurRadius: 30,
+                      spreadRadius: -5,
+                      offset: const Offset(0, 10),
                     ),
                   ],
                 ),
-              ),
-            const SizedBox(height: 24),
-
-            // Botón conectar
-            ElevatedButton.icon(
-              onPressed: _conectado ? _desconectar : _escanearYConectar,
-              icon: Icon(_conectado
-                  ? Icons.bluetooth_disabled
-                  : Icons.bluetooth_searching),
-              label:
-                  Text(_conectado ? 'Desconectar' : 'Conectar sensor'),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: _conectado
-                    ? Colors.grey.shade800
-                    : const Color(0xFFFF4D6A),
-                foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(vertical: 16),
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(30)),
-                textStyle: const TextStyle(
-                    fontSize: 16, fontWeight: FontWeight.bold),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildHistorial() {
-    return SafeArea(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Padding(
-            padding: EdgeInsets.all(20),
-            child: Text('Historial',
-                style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
-          ),
-          Expanded(
-            child: _historial.isEmpty
-                ? const Center(
-                    child: Column(
+                child: Column(
+                  children: [
+                    Row(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        Icon(Icons.history, size: 64, color: Colors.grey),
-                        SizedBox(height: 16),
-                        Text('Sin mediciones aún',
-                            style:
-                                TextStyle(fontSize: 16, color: Colors.grey)),
+                        Icon(Icons.show_chart,
+                            size: 14, color: color.withOpacity(0.7)),
+                        const SizedBox(width: 6),
+                        Text(
+                          'PROMEDIO · ÚLTIMOS 15s',
+                          style: TextStyle(
+                              color: color.withOpacity(0.8),
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                              letterSpacing: 1.5),
+                        ),
                       ],
                     ),
-                  )
-                : ListView.builder(
-                    padding: const EdgeInsets.symmetric(horizontal: 20),
-                    itemCount: _historial.length,
-                    itemBuilder: (context, index) {
-                      final m = _historial[index];
-                      final fecha = DateTime.parse(m['fecha']);
-                      final esNormal = m['estado'] == 'Normal';
-                      return Card(
-                        margin: const EdgeInsets.only(bottom: 10),
-                        shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(14)),
-                        child: ListTile(
-                          contentPadding: const EdgeInsets.symmetric(
-                              horizontal: 16, vertical: 8),
-                          leading: CircleAvatar(
-                            backgroundColor: esNormal
-                                ? const Color(0xFF00D4AA).withOpacity(0.2)
-                                : const Color(0xFFFF4D6A).withOpacity(0.2),
-                            child: Icon(Icons.favorite,
-                                color: esNormal
-                                    ? const Color(0xFF00D4AA)
-                                    : const Color(0xFFFF4D6A)),
-                          ),
-                          title: Text('${m['bpm']} BPM',
-                              style: const TextStyle(
-                                  fontWeight: FontWeight.bold, fontSize: 18)),
-                          subtitle: Text(m['estado'],
-                              style: TextStyle(
-                                  color: esNormal
-                                      ? const Color(0xFF00D4AA)
-                                      : const Color(0xFFFF4D6A))),
-                          trailing: Text(
-                            '${fecha.day}/${fecha.month}/${fecha.year}\n${fecha.hour}:${fecha.minute.toString().padLeft(2, '0')}',
-                            textAlign: TextAlign.right,
-                            style: const TextStyle(
-                                fontSize: 12, color: Colors.grey),
+                    const SizedBox(height: 24),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        ScaleTransition(
+                          scale: _bpm > 0
+                              ? _heartAnimation
+                              : const AlwaysStoppedAnimation(1.0),
+                          child: Icon(
+                            Icons.favorite,
+                            color: color,
+                            size: 52,
+                            shadows: [
+                              Shadow(
+                                  color: color.withOpacity(0.6),
+                                  blurRadius: 24),
+                            ],
                           ),
                         ),
-                      );
-                    },
-                  ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildPerfil() {
-    final nombreCtrl = TextEditingController(text: _perfil.nombre);
-    final edadCtrl = TextEditingController(
-        text: _perfil.edad > 0 ? '${_perfil.edad}' : '');
-    final pesoCtrl = TextEditingController(
-        text: _perfil.peso > 0 ? '${_perfil.peso}' : '');
-    final alturaCtrl = TextEditingController(
-        text: _perfil.altura > 0 ? '${_perfil.altura}' : '');
-
-    return SafeArea(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            const Text('Tu perfil',
-                style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 8),
-            const Text(
-                'Tus datos se usan para personalizar las alertas de FC',
-                style: TextStyle(color: Colors.grey, fontSize: 13)),
-            const SizedBox(height: 24),
-            TextField(
-              controller: nombreCtrl,
-              decoration: InputDecoration(
-                labelText: 'Nombre',
-                prefixIcon: const Icon(Icons.person),
-                border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12)),
-                filled: true,
-                fillColor: Colors.white.withOpacity(0.05),
-              ),
-            ),
-            const SizedBox(height: 14),
-            TextField(
-              controller: edadCtrl,
-              keyboardType: TextInputType.number,
-              decoration: InputDecoration(
-                labelText: 'Edad',
-                prefixIcon: const Icon(Icons.cake),
-                border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12)),
-                filled: true,
-                fillColor: Colors.white.withOpacity(0.05),
-              ),
-            ),
-            const SizedBox(height: 14),
-            const Text('Sexo',
-                style: TextStyle(color: Colors.grey, fontSize: 13)),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Expanded(
-                  child: GestureDetector(
-                    onTap: () =>
-                        setState(() => _perfil.sexo = 'Masculino'),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(vertical: 12),
+                        const SizedBox(width: 18),
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.baseline,
+                          textBaseline: TextBaseline.alphabetic,
+                          children: [
+                            Text(
+                              _bpm > 0 ? '$_bpm' : '--',
+                              style: TextStyle(
+                                fontSize: 88,
+                                fontWeight: FontWeight.w800,
+                                color: color,
+                                letterSpacing: -3,
+                                height: 1,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Padding(
+                              padding: const EdgeInsets.only(bottom: 14),
+                              child: Text(
+                                'BPM',
+                                style: TextStyle(
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.w600,
+                                    color: color.withOpacity(0.7),
+                                    letterSpacing: 1),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 20),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 18, vertical: 10),
                       decoration: BoxDecoration(
-                        color: _perfil.sexo == 'Masculino'
-                            ? const Color(0xFFFF4D6A).withOpacity(0.15)
-                            : Colors.white.withOpacity(0.05),
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(
-                            color: _perfil.sexo == 'Masculino'
-                                ? const Color(0xFFFF4D6A)
-                                : Colors.grey.shade700),
+                        color: color.withOpacity(0.18),
+                        borderRadius: BorderRadius.circular(24),
                       ),
-                      child: Center(
-                        child: Text('Masculino',
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            estado == 'Normal'
+                                ? Icons.check_circle
+                                : estado == 'Sin lectura'
+                                    ? Icons.hourglass_empty
+                                    : estado == 'Calibrando'
+                                        ? Icons.tune
+                                        : Icons.warning_amber_rounded,
+                            size: 16,
+                            color: color,
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            estado == 'Normal'
+                                ? 'Normal · $_minNormal-$_maxNormal BPM'
+                                : estado == 'Sin lectura'
+                                    ? _dedoDetectado
+                                        ? 'Procesando...'
+                                        : 'Coloca tu dedo en el sensor'
+                                    : estado == 'Calibrando'
+                                        ? 'Calibrando... mantén el dedo quieto'
+                                        : '$estado · rango $_minNormal-$_maxNormal',
                             style: TextStyle(
-                                color: _perfil.sexo == 'Masculino'
-                                    ? const Color(0xFFFF4D6A)
-                                    : Colors.grey,
-                                fontWeight: FontWeight.w500)),
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                                color: color),
+                          ),
+                        ],
                       ),
                     ),
-                  ),
+                  ],
                 ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: GestureDetector(
-                    onTap: () =>
-                        setState(() => _perfil.sexo = 'Femenino'),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(vertical: 12),
-                      decoration: BoxDecoration(
-                        color: _perfil.sexo == 'Femenino'
-                            ? const Color(0xFFFF4D6A).withOpacity(0.15)
-                            : Colors.white.withOpacity(0.05),
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(
-                            color: _perfil.sexo == 'Femenino'
-                                ? const Color(0xFFFF4D6A)
-                                : Colors.grey.shade700),
-                      ),
-                      child: Center(
-                        child: Text('Femenino',
-                            style: TextStyle(
-                                color: _perfil.sexo == 'Femenino'
-                                    ? const Color(0xFFFF4D6A)
-                                    : Colors.grey,
-                                fontWeight: FontWeight.w500)),
-                      ),
+              ),
+
+              const SizedBox(height: 16),
+
+              // Cards info
+              Row(
+                children: [
+                  Expanded(
+                    child: _buildInfoCard(
+                      icon: Icons.fingerprint,
+                      label: 'Sensor',
+                      value: _dedoDetectado ? 'Activo' : 'En espera',
+                      valueColor: _dedoDetectado
+                          ? const Color(0xFF00D4AA)
+                          : Colors.orange,
                     ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: _buildInfoCard(
+                      icon: Icons.timeline,
+                      label: 'Latidos',
+                      value: '${_beatDetector.sampleCount}',
+                      valueColor: Colors.white,
+                    ),
+                  ),
+                ],
+              ),
+
+              // ── Panel de diagnóstico ──
+              if (_conectado) ...[
+                const SizedBox(height: 12),
+                Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.04),
+                    borderRadius: BorderRadius.circular(14),
+                    border:
+                        Border.all(color: Colors.white.withOpacity(0.06)),
+                  ),
+                  child: Column(
+                    children: [
+                      // Indicador de latido detectado
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Row(
+                            children: [
+                              AnimatedContainer(
+                                duration: const Duration(milliseconds: 100),
+                                width: 12,
+                                height: 12,
+                                decoration: BoxDecoration(
+                                  color: beatRecent
+                                      ? const Color(0xFF00D4AA)
+                                      : Colors.white.withOpacity(0.15),
+                                  shape: BoxShape.circle,
+                                  boxShadow: beatRecent
+                                      ? [
+                                          BoxShadow(
+                                            color: const Color(0xFF00D4AA)
+                                                .withOpacity(0.8),
+                                            blurRadius: 10,
+                                          )
+                                        ]
+                                      : [],
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Text('Detector',
+                                  style: TextStyle(
+                                      color: Colors.white.withOpacity(0.5),
+                                      fontSize: 12)),
+                            ],
+                          ),
+                          Text(
+                              beatRecent
+                                  ? 'LATIDO'
+                                  : _dedoDetectado
+                                      ? 'Esperando pico...'
+                                      : 'Sin dedo',
+                              style: TextStyle(
+                                  color: beatRecent
+                                      ? const Color(0xFF00D4AA)
+                                      : Colors.white.withOpacity(0.6),
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600)),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      Container(
+                          height: 1,
+                          color: Colors.white.withOpacity(0.05)),
+                      const SizedBox(height: 10),
+
+                      // IR
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Row(
+                            children: [
+                              Icon(Icons.sensors,
+                                  size: 13,
+                                  color: Colors.white.withOpacity(0.4)),
+                              const SizedBox(width: 6),
+                              Text('Señal IR',
+                                  style: TextStyle(
+                                      color: Colors.white.withOpacity(0.5),
+                                      fontSize: 12)),
+                            ],
+                          ),
+                          Text('$_irValue',
+                              style: TextStyle(
+                                  color: Colors.white.withOpacity(0.8),
+                                  fontSize: 12,
+                                  fontFamily: 'monospace',
+                                  fontWeight: FontWeight.w500)),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+
+                      // Amplitud AC (calidad de la señal pulsátil)
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Row(
+                            children: [
+                              Icon(Icons.show_chart,
+                                  size: 13,
+                                  color: Colors.white.withOpacity(0.4)),
+                              const SizedBox(width: 6),
+                              Text('Amplitud AC',
+                                  style: TextStyle(
+                                      color: Colors.white.withOpacity(0.5),
+                                      fontSize: 12)),
+                            ],
+                          ),
+                          Text(
+                              _beatDetector.signalAmplitude.toStringAsFixed(0),
+                              style: TextStyle(
+                                  color: _beatDetector.signalAmplitude > 100
+                                      ? const Color(0xFF00D4AA)
+                                      : Colors.orange,
+                                  fontSize: 12,
+                                  fontFamily: 'monospace',
+                                  fontWeight: FontWeight.w500)),
+                        ],
+                      ),
+                    ],
                   ),
                 ),
               ],
-            ),
-            const SizedBox(height: 14),
-            TextField(
-              controller: pesoCtrl,
-              keyboardType: TextInputType.number,
-              decoration: InputDecoration(
-                labelText: 'Peso (kg)',
-                prefixIcon: const Icon(Icons.fitness_center),
-                border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12)),
-                filled: true,
-                fillColor: Colors.white.withOpacity(0.05),
-              ),
-            ),
-            const SizedBox(height: 14),
-            TextField(
-              controller: alturaCtrl,
-              keyboardType: TextInputType.number,
-              decoration: InputDecoration(
-                labelText: 'Altura (cm)',
-                prefixIcon: const Icon(Icons.height),
-                border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12)),
-                filled: true,
-                fillColor: Colors.white.withOpacity(0.05),
-              ),
-            ),
-            const SizedBox(height: 24),
-            ElevatedButton(
-              onPressed: () {
-                setState(() {
-                  _perfil.nombre = nombreCtrl.text;
-                  _perfil.edad = int.tryParse(edadCtrl.text) ?? 0;
-                  _perfil.peso = double.tryParse(pesoCtrl.text) ?? 0;
-                  _perfil.altura =
-                      double.tryParse(alturaCtrl.text) ?? 0;
-                });
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('Perfil guardado'),
-                    backgroundColor: Color(0xFF00D4AA),
+
+              // Alerta clínica
+              if (_dedoDetectado &&
+                  estado != 'Normal' &&
+                  estado != 'Sin lectura' &&
+                  estado != 'Calibrando') ...[
+                const SizedBox(height: 16),
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      colors: [
+                        const Color(0xFFFF4D6A).withOpacity(0.15),
+                        const Color(0xFFFF4D6A).withOpacity(0.05),
+                      ],
+                    ),
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(
+                        color: const Color(0xFFFF4D6A).withOpacity(0.3)),
                   ),
-                );
-              },
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFFFF4D6A),
-                foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(vertical: 16),
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(30)),
-                textStyle: const TextStyle(
-                    fontSize: 16, fontWeight: FontWeight.bold),
+                  child: Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: const BoxDecoration(
+                          color: Color(0xFFFF4D6A),
+                          shape: BoxShape.circle,
+                        ),
+                        child: const Icon(Icons.warning_rounded,
+                            color: Colors.white, size: 20),
+                      ),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              estado == 'Taquicardia'
+                                  ? 'Frecuencia elevada'
+                                  : 'Frecuencia baja',
+                              style: const TextStyle(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.bold,
+                                  color: Color(0xFFFF4D6A)),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              estado == 'Taquicardia'
+                                  ? 'Considera descansar y respirar profundo.'
+                                  : 'Si presentas mareos, consulta a un médico.',
+                              style: TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.white.withOpacity(0.8)),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+
+              const SizedBox(height: 32),
+
+              // Botón
+              Container(
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(30),
+                  boxShadow: _conectado
+                      ? []
+                      : [
+                          BoxShadow(
+                            color: const Color(0xFFFF4D6A).withOpacity(0.4),
+                            blurRadius: 20,
+                            offset: const Offset(0, 6),
+                          ),
+                        ],
+                ),
+                child: ElevatedButton.icon(
+                  onPressed:
+                      _conectado ? _desconectar : _escanearYConectar,
+                  icon: Icon(_conectado
+                      ? Icons.bluetooth_disabled
+                      : Icons.bluetooth_searching),
+                  label:
+                      Text(_conectado ? 'Desconectar' : 'Conectar sensor'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _conectado
+                        ? const Color(0xFF2A2F38)
+                        : const Color(0xFFFF4D6A),
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 18),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(30)),
+                    textStyle: const TextStyle(
+                        fontSize: 16, fontWeight: FontWeight.bold),
+                    elevation: 0,
+                  ),
+                ),
               ),
-              child: const Text('Guardar perfil'),
-            ),
-          ],
+            ],
+          ),
         ),
+      ),
+    );
+  }
+
+  Widget _buildInfoCard({
+    required IconData icon,
+    required String label,
+    required String value,
+    required Color valueColor,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1A1F26),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.white.withOpacity(0.06)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(icon, size: 14, color: Colors.white.withOpacity(0.4)),
+              const SizedBox(width: 6),
+              Text(label,
+                  style: TextStyle(
+                      color: Colors.white.withOpacity(0.5),
+                      fontSize: 12,
+                      fontWeight: FontWeight.w500)),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(value,
+              style: TextStyle(
+                  color: valueColor,
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold)),
+        ],
       ),
     );
   }
