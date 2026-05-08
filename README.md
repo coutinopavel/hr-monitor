@@ -2,8 +2,11 @@
 
 App de monitoreo de frecuencia cardiaca en tiempo real usando un sensor con pletismografia de luz infrarroja y luz roja.
 
-## Video muestra:
+## Video muestra equipo:
 https://drive.google.com/file/d/14xpcfEq3-tlQP8gM3_9fbtuUQUWU128F/view?usp=sharing
+
+## Videos individuales:
+Ana - https://drive.google.com/file/d/1pKV2ntup5so8eNc5ZmuHe49ggUlgUGXh/view?usp=sharing
 
 
 ## Componentes
