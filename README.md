@@ -18,8 +18,9 @@ Ana - https://drive.google.com/file/d/1pKV2ntup5so8eNc5ZmuHe49ggUlgUGXh/view?usp
 
 ## Estructura del repo
 
-- `hr-monitor//`: app Flutter
-- `hr_arduino/`: firmware Arduino
+- `hr-monitor/flutter_equipo`: app Flutter
+- `hr_monitor/firmware_arduino`: firmware Arduino
+- `hr_monitor/ana_individual`: app Flutter Ana
 ## Requisitos de software
 
 - Flutter SDK (canal estable)
@@ -29,9 +30,9 @@ Ana - https://drive.google.com/file/d/1pKV2ntup5so8eNc5ZmuHe49ggUlgUGXh/view?usp
 
 ## Configuracion del firmware (Arduino)
 
-1. Copia el archivo `hr_arduino/heart_monitor_final/heart_monitor_final.ino` a una carpeta fuera del repositorio.
+1. Copia el archivo `hr_monitor/firmware_arduino/heart_monitor_final.ino` a una carpeta fuera del repositorio.
 2. Abre el .ino en el Arduino IDE.
-3. Selecciona la placa correspondiente a Seeed XIAO nRF52840.
+3. Selecciona la placa correspondiente a Seeed XIAO nRF52840 Sense.
 4. Compila y sube el firmware al microcontrolador.
 
 Nota: el Arduino IDE puede fallar si el .ino esta dentro del repositorio; moverlo a otra carpeta evita conflictos de rutas.
