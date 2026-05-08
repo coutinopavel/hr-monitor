@@ -18,10 +18,8 @@ Ana - https://drive.google.com/file/d/1pKV2ntup5so8eNc5ZmuHe49ggUlgUGXh/view?usp
 
 ## Estructura del repo
 
-- `lib/`: app Flutter
-- `hr_arduino/heart_monitor_final/`: firmware Arduino
-- `Firmware/`: archivos del firmware (si aplica)
-
+- `hr-monitor//`: app Flutter
+- `hr_arduino/`: firmware Arduino
 ## Requisitos de software
 
 - Flutter SDK (canal estable)
