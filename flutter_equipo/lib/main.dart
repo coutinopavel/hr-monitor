@@ -29,7 +29,7 @@ class HrMonitorApp extends StatelessWidget {
   }
 }
 
-// ── Algoritmo de detección de latidos ──
+// Algoritmo de detección de latidos
 // Usa filtro DC + media móvil + detección por cruce por cero
 // con período refractario para evitar doble conteo
 class BeatDetector {
@@ -56,15 +56,15 @@ class BeatDetector {
   double _lastSignal = 0;
   double _signalMin = 0;
   double _signalMax = 0;
-  int _lastBeatDetectedAt = 0; // para parpadeo visual
+  int _lastBeatDetectedAt = 0; 
 
-  // Validación de variabilidad: rechaza cambios extremos
+  // Rechaza cambios extremos
   int _lastValidInterval = 0;
 
   // Buffer temporal de BPMs
   final List<MapEntry<int, int>> _bpmHistory = [];
   static const int _averageWindowMs = 15000;
-  static const int _minSamplesForAvg = 2; // bajado de 3 a 2 para mostrar antes
+  static const int _minSamplesForAvg = 2; 
 
   int _avgBpm = 0;
   double _instantBpm = 0;
@@ -88,22 +88,13 @@ class BeatDetector {
     double dcOut = dcW - _dcW;
     _dcW = dcW;
 
-<<<<<<< HEAD
         // Filtrar 300ms a 2000ms = 30 a 200 BPM
         if (delta > 300 && delta < 2000) {
           _beatsPerMinute = 60000.0 / delta;
-=======
-    // Media móvil
-    _maSum -= _maBuffer[_maIndex];
-    _maBuffer[_maIndex] = dcOut;
-    _maSum += dcOut;
-    _maIndex = (_maIndex + 1) % _maSize;
-    double signal = _maSum / _maSize;
->>>>>>> 65bc4fc (Cambié el main.dart, usando promedio de FC)
 
     _lastSignal = signal;
 
-    // Esperar a que el filtro DC se estabilice (~1 segundo)
+    // Esperar a que el filtro DC se estabilice (1 segundo)
     if (_samplesProcessed < 50) {
       _signalPrev = signal;
       return;
@@ -151,7 +142,7 @@ class BeatDetector {
             _bpmHistory.removeWhere(
                 (e) => now - e.key > _averageWindowMs);
 
-            // MEDIANA (más robusta a outliers)
+            // Filtro de Mediana por los outliers
             if (_bpmHistory.length >= _minSamplesForAvg) {
               List<int> sorted = _bpmHistory.map((e) => e.value).toList()
                 ..sort();
@@ -191,15 +182,9 @@ class BeatDetector {
   }
 }
 
-<<<<<<< HEAD
 // Pantalla principal con navegación
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
-=======
-// ── Pantalla única: Monitor ──
-class MonitorScreen extends StatefulWidget {
-  const MonitorScreen({super.key});
->>>>>>> 65bc4fc (Cambié el main.dart, usando promedio de FC)
 
   @override
   State<MonitorScreen> createState() => _MonitorScreenState();
@@ -452,7 +437,6 @@ class _MonitorScreenState extends State<MonitorScreen>
                             : Colors.white.withOpacity(0.08),
                       ),
                     ),
-<<<<<<< HEAD
                     child: Text(
                       estado == 'Normal'
                           ? '● Normal (${rango['min']}-${rango['max']} BPM)'
@@ -462,32 +446,6 @@ class _MonitorScreenState extends State<MonitorScreen>
                                   : 'Esperando lectura...'
                               : '$estado (rango: ${rango['min']}-${rango['max']})',
                       style: TextStyle(fontSize: 13, color: color),
-=======
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Container(
-                          width: 8,
-                          height: 8,
-                          decoration: BoxDecoration(
-                            color: _conectado
-                                ? const Color(0xFF00D4AA)
-                                : Colors.grey,
-                            shape: BoxShape.circle,
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Text(
-                          _conectado ? 'En vivo' : 'Sin conexión',
-                          style: TextStyle(
-                              fontSize: 12,
-                              fontWeight: FontWeight.w500,
-                              color: _conectado
-                                  ? const Color(0xFF00D4AA)
-                                  : Colors.grey),
-                        ),
-                      ],
->>>>>>> 65bc4fc (Cambié el main.dart, usando promedio de FC)
                     ),
                   ),
                 ],
@@ -660,7 +618,7 @@ class _MonitorScreenState extends State<MonitorScreen>
                 ],
               ),
 
-              // ── Panel de diagnóstico ──
+              // Panel de diagnóstico
               if (_conectado) ...[
                 const SizedBox(height: 12),
                 Container(
@@ -784,7 +742,7 @@ class _MonitorScreenState extends State<MonitorScreen>
                 ),
               ],
 
-              // Alerta clínica
+              // Alerta 
               if (_dedoDetectado &&
                   estado != 'Normal' &&
                   estado != 'Sin lectura' &&
