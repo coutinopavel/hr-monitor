@@ -6,8 +6,6 @@ void main() {
 
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
-
-  // This widget is the root of your application.
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
@@ -45,7 +43,7 @@ class _ScorePageState extends State<ScorePage> {
   double overallAverage() {
     return grandTotal() / 36;
   }
-  // Me ronda de 6
+  // Mejor ronda de 6
   int bestRound() {
     int best = 0;
     int index = 0;
